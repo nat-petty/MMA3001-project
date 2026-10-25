@@ -74,8 +74,6 @@ Data attribution
 - Kaya, H., Tüfekci, P., & Gürgen, S. F. (2012). Local and global learning methods for predicting power of a combined gas & steam turbine. ICETCEE.
 The dataset is third-party material. Confirm its redistribution terms before committing it to a public repository. If it is not included, explain where authorised users can obtain it.
 AI assistance and academic integrity
-ChatGPT was used to assist with drafting and explaining code, documentation, testing and the report. The final submission should accurately describe the student's actual use of AI, independent checks, corrections and engineering decisions. The student remains responsible for understanding and verifying the submitted work.
-Licence
+I used generative AI, including Chat gpt to assist with the writing of code and used some assistance in structuring my report based on the outputs given. 
 See LICENSE for the repository's code licence, once added. A code licence does not automatically apply to the third-party dataset.
-Submitting a zipped clone
-The assignment brief requires both an accessible GitHub repository link and a zipped clone uploaded to Moodle. After committing your final changes, use Git to clone the repository to a fresh local folder and compress that folder into a ZIP. This preserves the .git directory and commit history. GitHub's Code → Download ZIP is a source-code snapshot, not a full Git clone.
+
