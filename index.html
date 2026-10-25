@@ -1,0 +1,198 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CCPP Source Code Documentation</title><style>body{font:16px/1.6 system-ui,Arial;color:#182536;background:#f6f8fb;margin:0}header{background:#173456;color:white;padding:30px max(24px,calc((100vw - 1050px)/2))}main{max-width:1050px;margin:30px auto;padding:0 24px}nav{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0}nav a{background:#e5eef8;padding:6px 10px;border-radius:6px;color:#173456;text-decoration:none}section{background:white;padding:20px 25px;border-radius:10px;margin:18px 0;box-shadow:0 1px 5px #dfe5eb}pre{background:#101b2c;color:#f0f4fa;padding:18px;overflow:auto;font-size:12px;line-height:1.5}summary{cursor:pointer;color:#1261a0;font-weight:600}code{font-family:Consolas,monospace}footer{margin:40px 0;color:#596779}</style></head><body><header><h1>Combined Cycle Power Plant — Source Code Documentation</h1><p>MMA3001 | Source: <code>notebooks/CCPP_analysis.ipynb</code></p></header><main><p>This HTML reference documents the existing Python notebook, its analysis stages, and its user-defined <code>metrics</code> function. Expand each stage to inspect its source code. This is static HTML documentation generated from the notebook (a pdoc-like alternative), not a record of test execution.</p><nav><a href="#s0">1. Install packages and load the data</a><a href="#s1">2. Verify dataset integrity and data dictionary</a><a href="#s2">3. Exploratory data analysis</a><a href="#s3">4. Holdout design and baseline models</a><a href="#s4">5. Tune the best nonlinear candidate</a><a href="#s5">6. Final withheld test evaluation</a><a href="#s6">7. Five repetitions of two-fold validation (5×2)</a><a href="#s7">8. Sensitivity and engineering interpretation</a><a href="#s8">9. Robustness checks and uncertainty</a><a href="#s9">10. Write up your actual findings</a><a href="#functions">Function reference</a></nav><section id="functions"><h2>Function reference: metrics(y_true, y_pred)</h2><p>Computes regression accuracy metrics for observed versus predicted net electrical power output.</p><p><strong>Inputs:</strong> <code>y_true</code> and <code>y_pred</code>, aligned array-like numerical values in MW.</p><p><strong>Returns:</strong> a dictionary containing <code>MAE_MW</code>, <code>RMSE_MW</code> (both MW), and <code>R2</code> (dimensionless).</p><pre><code>def metrics(y_true, y_pred):
+    &quot;&quot;&quot;Calculate prediction accuracy metrics for power-output regression.
+
+    Compare observed and predicted net electrical power output using three
+    complementary metrics. MAE and RMSE are expressed in megawatts (MW),
+    while R² is dimensionless. Lower MAE/RMSE and higher R² indicate better
+    agreement between predictions and observations.
+
+    Args:
+        y_true (array-like): Observed net electrical power output (PE), in MW.
+        y_pred (array-like): Predicted PE values, in MW, in the same order
+            and with the same length as ``y_true``.
+
+    Returns:
+        dict[str, float]: A dictionary containing:
+            - ``MAE_MW``: Mean absolute prediction error, in MW.
+            - ``RMSE_MW``: Root mean squared error, in MW; penalises larger
+              errors more heavily than MAE.
+            - ``R2``: Coefficient of determination (unitless).
+
+    Notes:
+        This helper is used for model assessment on held-out observations
+        and within temperature-group diagnostics. It does not fit a model.
+    &quot;&quot;&quot;
+    return {&#x27;MAE_MW&#x27;:mean_absolute_error(y_true,y_pred),</code></pre></section><section id="s0"><h2>1. Install packages and load the data</h2><p>## 1. Install packages and load the data</p><details><summary>View notebook source code</summary><pre><code>%pip -q install pandas odfpy scikit-learn matplotlib seaborn joblib pytest pdoc
+
+from pathlib import Path
+import os, time, json, warnings
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from IPython.display import display
+from sklearn.model_selection import train_test_split, KFold, cross_validate, GridSearchCV
+from sklearn.dummy import DummyRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.inspection import permutation_importance, PartialDependenceDisplay
+from joblib import dump
+SEED = 42
+sns.set_theme(style=&#x27;whitegrid&#x27;)
+DATA = Path(&#x27;data/Folds5x2_pp.ods&#x27;)
+if not DATA.exists():
+    DATA = Path(&#x27;Folds5x2_pp.ods&#x27;)
+if not DATA.exists():
+    try:
+        from google.colab import files
+        print(&#x27;Upload Folds5x2_pp.ods&#x27;)
+        uploaded = files.upload()
+        DATA = Path(&#x27;Folds5x2_pp.ods&#x27;)
+    except ImportError:
+        raise FileNotFoundError(&#x27;Place Folds5x2_pp.ods in data/ or current directory&#x27;)
+assert DATA.exists(), &#x27;Dataset not found&#x27;
+OUTPUT = Path(&#x27;results&#x27;); OUTPUT.mkdir(exist_ok=True)
+sheets = pd.read_excel(DATA, sheet_name=None, engine=&#x27;odf&#x27;)
+print(&#x27;Sheets:&#x27;, {name: df.shape for name, df in sheets.items()})
+df = sheets[&#x27;Sheet1&#x27;].copy()
+display(df.head())</code></pre></details></section><section id="s1"><h2>2. Verify dataset integrity and data dictionary</h2><p>Check dimensions, data types, missing/non-finite values, duplicates, and whether all five sheets contain the same observations. Duplicates are reported rather than automatically deleted because repeated operating states can be genuine. No imputing is done without evidence.</p><details><summary>View notebook source code</summary><pre><code>FEATURES = [&#x27;AT&#x27;,&#x27;V&#x27;,&#x27;AP&#x27;,&#x27;RH&#x27;]; TARGET = &#x27;PE&#x27;
+expected = FEATURES + [TARGET]
+for name, frame in sheets.items():
+    assert list(frame.columns) == expected, (name, frame.columns.tolist())
+    assert frame.shape == (9568,5), (name,frame.shape)
+    assert all(pd.api.types.is_numeric_dtype(frame[c]) for c in expected)
+    assert np.isfinite(frame[expected].to_numpy()).all(), f&#x27;Nonfinite values in {name}&#x27;
+reference = df.value_counts(dropna=False).sort_index()
+for name, frame in sheets.items():
+    assert reference.equals(frame.value_counts(dropna=False).sort_index()), f&#x27;{name} is not the same multiset&#x27;
+print(&#x27;Missing values:\n&#x27;, df.isna().sum())
+print(&#x27;Exact duplicate rows:&#x27;,df.duplicated().sum())
+display(df.describe().T)
+display(df.corr(numeric_only=True).round(3))</code></pre></details></section><section id="s2"><h2>3. Exploratory data analysis</h2><p>Interpret distributions, unusual observations, pairwise relationships, and whether linearity is plausible. **Correlation does not prove causation.**</p><details><summary>View notebook source code</summary><pre><code>fig, axes = plt.subplots(2,3,figsize=(14,8))
+for ax,col in zip(axes.flat,expected):
+    sns.histplot(df[col],kde=True,ax=ax)
+for ax in axes.flat[len(expected):]:ax.axis(&#x27;off&#x27;)
+plt.tight_layout();plt.savefig(OUTPUT/&#x27;distributions.png&#x27;,dpi=160);plt.show()
+fig, axes = plt.subplots(2,2,figsize=(12,8))
+for ax,col in zip(axes.flat,FEATURES):
+    sns.scatterplot(data=df,x=col,y=TARGET,alpha=.18,s=10,ax=ax)
+plt.tight_layout();plt.savefig(OUTPUT/&#x27;feature_scatter.png&#x27;,dpi=160);plt.show()
+plt.figure(figsize=(7,5));sns.heatmap(df.corr(),annot=True,cmap=&#x27;coolwarm&#x27;,center=0);plt.tight_layout();plt.savefig(OUTPUT/&#x27;correlations.png&#x27;,dpi=160);plt.show()</code></pre></details></section><section id="s3"><h2>4. Holdout design and baseline models</h2><p>Create a 20% test set **once** on Sheet1. All tuning and selection use the remaining 80%. The untouched test set is evaluated only after selecting a model. A mean predictor is a sanity-check baseline, and ordinary least squares is the primary engineering baseline.</p><details><summary>View notebook source code</summary><pre><code>X=df[FEATURES];y=df[TARGET]
+X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=.2,random_state=SEED)
+def metrics(y_true, y_pred):
+    &quot;&quot;&quot;Calculate prediction accuracy metrics for power-output regression.
+
+    Compare observed and predicted net electrical power output using three
+    complementary metrics. MAE and RMSE are expressed in megawatts (MW),
+    while R² is dimensionless. Lower MAE/RMSE and higher R² indicate better
+    agreement between predictions and observations.
+
+    Args:
+        y_true (array-like): Observed net electrical power output (PE), in MW.
+        y_pred (array-like): Predicted PE values, in MW, in the same order
+            and with the same length as ``y_true``.
+
+    Returns:
+        dict[str, float]: A dictionary containing:
+            - ``MAE_MW``: Mean absolute prediction error, in MW.
+            - ``RMSE_MW``: Root mean squared error, in MW; penalises larger
+              errors more heavily than MAE.
+            - ``R2``: Coefficient of determination (unitless).
+
+    Notes:
+        This helper is used for model assessment on held-out observations
+        and within temperature-group diagnostics. It does not fit a model.
+    &quot;&quot;&quot;
+    return {&#x27;MAE_MW&#x27;:mean_absolute_error(y_true,y_pred),
+            &#x27;RMSE_MW&#x27;:np.sqrt(mean_squared_error(y_true,y_pred)),
+            &#x27;R2&#x27;:r2_score(y_true,y_pred)}
+models={&#x27;Mean baseline&#x27;:DummyRegressor(strategy=&#x27;mean&#x27;),
+        &#x27;Linear regression&#x27;:LinearRegression(),
+        &#x27;Random forest&#x27;:RandomForestRegressor(n_estimators=150,min_samples_leaf=2,n_jobs=-1,random_state=SEED),
+        &#x27;Histogram gradient boosting&#x27;:HistGradientBoostingRegressor(max_iter=200,learning_rate=.1,random_state=SEED)}
+cv=KFold(n_splits=5,shuffle=True,random_state=SEED)
+rows=[]
+for name,model in models.items():
+    start=time.perf_counter()
+    scores=cross_validate(model,X_train,y_train,cv=cv,scoring={&#x27;mae&#x27;:&#x27;neg_mean_absolute_error&#x27;,&#x27;rmse&#x27;:&#x27;neg_root_mean_squared_error&#x27;,&#x27;r2&#x27;:&#x27;r2&#x27;},n_jobs=1)
+    elapsed=time.perf_counter()-start
+    rows.append({&#x27;model&#x27;:name,&#x27;CV_MAE_MW&#x27;:-scores[&#x27;test_mae&#x27;].mean(),
+                 &#x27;CV_RMSE_MW&#x27;:-scores[&#x27;test_rmse&#x27;].mean(),&#x27;CV_R2&#x27;:scores[&#x27;test_r2&#x27;].mean(),
+                 &#x27;CV_RMSE_SD&#x27;:scores[&#x27;test_rmse&#x27;].std(ddof=1),&#x27;CV_seconds&#x27;:elapsed})
+cv_results=pd.DataFrame(rows).sort_values(&#x27;CV_RMSE_MW&#x27;)
+display(cv_results)
+cv_results.to_csv(OUTPUT/&#x27;model_comparison_cv.csv&#x27;,index=False)</code></pre></details></section><section id="s4"><h2>5. Tune the best nonlinear candidate</h2><p>Use only the training set for tuning. The search space is deliberately small enough for Colab; runtime varies by hardware. Compare tuned and untuned validation scores, not just training fit.</p><details><summary>View notebook source code</summary><pre><code>candidate=RandomForestRegressor(random_state=SEED,n_jobs=-1)
+search=GridSearchCV(candidate,{&#x27;n_estimators&#x27;:[100,200], &#x27;min_samples_leaf&#x27;:[1,3,5], &#x27;max_features&#x27;:[0.7,1.0]},
+                    scoring=&#x27;neg_root_mean_squared_error&#x27;,cv=cv,n_jobs=-1,refit=True)
+t0=time.perf_counter();search.fit(X_train,y_train);tuning_seconds=time.perf_counter()-t0
+print(&#x27;Best RF settings:&#x27;,search.best_params_,&#x27;CV RMSE (MW):&#x27;,-search.best_score_,&#x27;Time (s):&#x27;,round(tuning_seconds,2))
+selected_name=cv_results.iloc[0][&#x27;model&#x27;]
+selected_model=models[selected_name]
+# Select between tuned RF and the best default model using training CV only.
+if -search.best_score_ &lt; cv_results.iloc[0][&#x27;CV_RMSE_MW&#x27;]:
+    selected_name=&#x27;Tuned random forest&#x27;;selected_model=search.best_estimator_
+else:
+    selected_model.fit(X_train,y_train)
+print(&#x27;Selected by CV:&#x27;,selected_name)</code></pre></details></section><section id="s5"><h2>6. Final withheld test evaluation</h2><p>Only now use the held-out test data. Evaluate the selected model and the linear regression baseline on identical observations. A test score is not an unbiased estimate if you repeatedly change models after seeing it.</p><details><summary>View notebook source code</summary><pre><code>linear=LinearRegression().fit(X_train,y_train)
+if selected_name!=&#x27;Tuned random forest&#x27;:selected_model.fit(X_train,y_train)
+rows=[]
+for name,model in [(&#x27;Linear regression&#x27;,linear),(selected_name,selected_model)]:
+    start=time.perf_counter(); pred=model.predict(X_test);pred_seconds=time.perf_counter()-start
+    rows.append({&#x27;model&#x27;:name,**metrics(y_test,pred),&#x27;predict_seconds&#x27;:pred_seconds})
+test_results=pd.DataFrame(rows);display(test_results)
+test_results.to_csv(OUTPUT/&#x27;holdout_results.csv&#x27;,index=False)
+pred=selected_model.predict(X_test)
+fig,axes=plt.subplots(1,2,figsize=(12,4))
+axes[0].scatter(y_test,pred,alpha=.3,s=12)
+lims=[min(y_test.min(),pred.min()),max(y_test.max(),pred.max())]
+axes[0].plot(lims,lims,&#x27;k--&#x27;);axes[0].set(xlabel=&#x27;Actual PE (MW)&#x27;,ylabel=&#x27;Predicted PE (MW)&#x27;,title=&#x27;Holdout predictions&#x27;)
+axes[1].scatter(pred,y_test-pred,alpha=.3,s=12);axes[1].axhline(0,color=&#x27;black&#x27;,linestyle=&#x27;--&#x27;)
+axes[1].set(xlabel=&#x27;Predicted PE (MW)&#x27;,ylabel=&#x27;Residual actual − predicted (MW)&#x27;,title=&#x27;Residuals&#x27;)
+plt.tight_layout();plt.savefig(OUTPUT/&#x27;holdout_diagnostics.png&#x27;,dpi=160);plt.show()
+dump(selected_model,OUTPUT/&#x27;selected_model.joblib&#x27;)</code></pre></details></section><section id="s6"><h2>7. Five repetitions of two-fold validation (5×2)</h2><p>The supplied sheets are five shuffled orderings of **the same observations**. For each sheet, train on the first half and evaluate on the second; then swap halves. This produces ten paired test measurements for linear regression and the selected approach. **Important:** Model selection above already used Sheet1; therefore this is a repeated robustness comparison, *not* a completely independent post-selection confirmation. For a formal unbiased comparison, pre-specify models and settings before running this protocol, or use nested selection.</p><details><summary>View notebook source code</summary><pre><code>from sklearn.base import clone
+fold_rows=[]
+for repeat,(sheet_name,frame) in enumerate(sheets.items(),start=1):
+    n=len(frame);half=n//2
+    for fold,(train_ids,test_ids) in enumerate([(np.arange(half),np.arange(half,n)),(np.arange(half,n),np.arange(half))],start=1):
+        xtr=frame.iloc[train_ids][FEATURES]; ytr=frame.iloc[train_ids][TARGET]
+        xte=frame.iloc[test_ids][FEATURES]; yte=frame.iloc[test_ids][TARGET]
+        for name,est in [(&#x27;Linear regression&#x27;,LinearRegression()),(selected_name,clone(selected_model))]:
+            start=time.perf_counter();est.fit(xtr,ytr);fit_seconds=time.perf_counter()-start
+            prediction=est.predict(xte)
+            fold_rows.append({&#x27;repeat&#x27;:repeat,&#x27;fold&#x27;:fold,&#x27;model&#x27;:name,**metrics(yte,prediction),&#x27;fit_seconds&#x27;:fit_seconds})
+fold_results=pd.DataFrame(fold_rows)
+fold_results.to_csv(OUTPUT/&#x27;five_by_two_results.csv&#x27;,index=False)
+display(fold_results.groupby(&#x27;model&#x27;)[[&#x27;MAE_MW&#x27;,&#x27;RMSE_MW&#x27;,&#x27;R2&#x27;,&#x27;fit_seconds&#x27;]].agg([&#x27;mean&#x27;,&#x27;std&#x27;]).round(3))
+paired=fold_results.pivot(index=[&#x27;repeat&#x27;,&#x27;fold&#x27;],columns=&#x27;model&#x27;,values=&#x27;RMSE_MW&#x27;)
+print(&#x27;Per-fold RMSE differences (selected minus linear):&#x27;)
+display(paired.assign(difference=paired[selected_name]-paired[&#x27;Linear regression&#x27;]))
+print(&#x27;NOTE: 10 scores are dependent because the training/test observations recur. Do not treat them as 10 independent experiments.&#x27;)</code></pre></details></section><section id="s7"><h2>8. Sensitivity and engineering interpretation</h2><p>Permutation importance measures how much test error rises when one variable is shuffled. Correlated inputs can share importance, so this is not a causal effect. Partial dependence shows the model response when a feature changes while averaging over other observed features; unrealistic feature combinations are a limitation.</p><details><summary>View notebook source code</summary><pre><code>importance=permutation_importance(selected_model,X_test,y_test,n_repeats=10,random_state=SEED,scoring=&#x27;neg_root_mean_squared_error&#x27;)
+imp=pd.DataFrame({&#x27;feature&#x27;:FEATURES,&#x27;RMSE_increase_MW&#x27;:importance.importances_mean,&#x27;SD&#x27;:importance.importances_std}).sort_values(&#x27;RMSE_increase_MW&#x27;,ascending=False)
+display(imp);imp.to_csv(OUTPUT/&#x27;permutation_importance.csv&#x27;,index=False)
+plt.figure(figsize=(7,4));sns.barplot(data=imp,x=&#x27;RMSE_increase_MW&#x27;,y=&#x27;feature&#x27;);plt.tight_layout();plt.savefig(OUTPUT/&#x27;importance.png&#x27;,dpi=160);plt.show()
+fig,axes=plt.subplots(2,2,figsize=(11,8))
+PartialDependenceDisplay.from_estimator(selected_model,X_train,FEATURES,ax=axes)
+plt.tight_layout();plt.savefig(OUTPUT/&#x27;partial_dependence.png&#x27;,dpi=160);plt.show()</code></pre></details></section><section id="s8"><h2>9. Robustness checks and uncertainty</h2><p>Check performance by temperature quartile and bootstrap the **fixed** test predictions to estimate uncertainty in holdout RMSE. Bootstrap intervals describe test-sample variation conditional on this fitted model, not uncertainty from training or temporal drift.</p><details><summary>View notebook source code</summary><pre><code>diagnostics=X_test.copy();diagnostics[&#x27;actual&#x27;]=y_test.to_numpy();diagnostics[&#x27;predicted&#x27;]=pred
+diagnostics[&#x27;temp_group&#x27;]=pd.qcut(diagnostics[&#x27;AT&#x27;],4,duplicates=&#x27;drop&#x27;)
+for group,sub in diagnostics.groupby(&#x27;temp_group&#x27;,observed=True):
+    print(group,metrics(sub[&#x27;actual&#x27;],sub[&#x27;predicted&#x27;]))
+rng=np.random.default_rng(SEED);actual=y_test.to_numpy();predicted=np.asarray(pred)
+boot=[]
+for _ in range(1000):
+    ids=rng.integers(0,len(actual),len(actual))
+    boot.append(np.sqrt(np.mean((actual[ids]-predicted[ids])**2)))
+print(&#x27;Bootstrap 95% RMSE interval (MW):&#x27;,np.quantile(boot,[.025,.975]))
+summary={&#x27;selected_model&#x27;:selected_name,&#x27;holdout&#x27;:test_results.to_dict(orient=&#x27;records&#x27;),
+         &#x27;best_rf_params&#x27;:search.best_params_,&#x27;rf_tuning_seconds&#x27;:tuning_seconds,
+         &#x27;rmse_bootstrap_95_percent&#x27;:np.quantile(boot,[.025,.975]).tolist()}
+(OUTPUT/&#x27;summary.json&#x27;).write_text(json.dumps(summary,indent=2))</code></pre></details></section><section id="s9"><h2>10. Write up your actual findings</h2><p>Complete these after running the notebook; do **not** invent metrics:
+
+1. **Data:** report feature ranges, missing data, duplicates, and strongest associations.
+2. **Method:** explain OLS versus nonlinear ensembles, tuning settings, random seed and split logic.
+3. **Results:** quote CV, untouched holdout, 5×2 means/variability, runtime, and uncertainty.
+4. **Engineering:** identify strongest predictive variables and whether their directions are physically plausible; do not infer causation from this observational dataset.
+5. **Limitations:** only full-load observations, 2006–2011, no timestamps or plant operational controls, possible correlated inputs, no evidence of extrapolation performance.
+6. **AI reflection:** disclose the use of ChatGPT for planning/code assistance, identify your verification steps and decisions, and record any corrected errors.
+
+**Submission:** export this notebook as `.ipynb`, retain `results/`, generate documentation and tests in GitHub, and write a separate 5–10 page report.</p><details><summary>View notebook source code</summary><pre><code></code></pre></details></section><footer>Generated from the documented notebook. Results and test status must be checked separately by running the notebook.</footer></main></body></html>
